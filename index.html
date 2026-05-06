@@ -1,403 +1,8 @@
 <html lang="pt-BR"><head>
-<script id="aura-supabase-token-firewall">(function () {
-  if (window.__AURA_SUPABASE_FIREWALL__) return;
-  window.__AURA_SUPABASE_FIREWALL__ = true;
-
-  var SUPABASE_HOST = "hoirqrkdgbmvpwutwuwj.supabase.co";
-  var BLOCKED_KEY_PATTERNS = [
-    /^sb-[a-z0-9-]+-auth-token$/i,
-    /^supabase\.auth\.token$/i
-  ];
-
-  function isBlockedStorageKey(key) {
-    if (typeof key !== "string") return false;
-    for (var i = 0; i < BLOCKED_KEY_PATTERNS.length; i++) {
-      if (BLOCKED_KEY_PATTERNS[i].test(key)) return true;
-    }
-    return false;
-  }
-
-  function toAbsoluteUrl(input) {
-    try {
-      return new URL(input, window.location.href);
-    } catch {
-      return null;
-    }
-  }
-
-  function isSupabaseDestination(input) {
-    var parsed = toAbsoluteUrl(input);
-    if (!parsed) return false;
-    if (SUPABASE_HOST && parsed.host === SUPABASE_HOST) return true;
-    return parsed.host.endsWith(".supabase.co");
-  }
-
-  function pathLooksSensitive(input) {
-    var parsed = toAbsoluteUrl(input);
-    if (!parsed) return false;
-    return /^\/(auth|rest|functions)\/v1\//.test(parsed.pathname || "");
-  }
-
-  function headersContainAuth(headersLike) {
-    if (!headersLike) return false;
-
-    try {
-      if (typeof Headers !== "undefined" && headersLike instanceof Headers) {
-        return !!(headersLike.get("authorization") || headersLike.get("apikey"));
-      }
-    } catch {}
-
-    if (Array.isArray(headersLike)) {
-      for (var i = 0; i < headersLike.length; i++) {
-        var pair = headersLike[i] || [];
-        var name = String(pair[0] || "").toLowerCase();
-        if (name === "authorization" || name === "apikey") return true;
-      }
-      return false;
-    }
-
-    if (typeof headersLike === "object") {
-      var keys = Object.keys(headersLike);
-      for (var j = 0; j < keys.length; j++) {
-        var k = keys[j].toLowerCase();
-        if (k === "authorization" || k === "apikey") return true;
-      }
-    }
-    return false;
-  }
-
-  function requestLooksSensitive(input, init, extraHeaders) {
-    var url = "";
-    try {
-      if (typeof input === "string") {
-        url = input;
-      } else if (input && typeof input.url === "string") {
-        url = input.url;
-      }
-    } catch {}
-
-    var headers =
-      (init && init.headers) ||
-      (input && input.headers) ||
-      extraHeaders ||
-      null;
-    var hasAuthHeaders = headersContainAuth(headers);
-    if (hasAuthHeaders) return true;
-
-    if (!url) return false;
-    if (isSupabaseDestination(url) && pathLooksSensitive(url)) return true;
-    return false;
-  }
-
-  function patchStorage(storage, storageName) {
-    if (!storage) return;
-    var proto = Object.getPrototypeOf(storage);
-    if (!proto || proto.__auraSupabaseFirewallPatched) return;
-
-    var rawGetItem = proto.getItem;
-    var rawSetItem = proto.setItem;
-    var rawRemoveItem = proto.removeItem;
-    var rawClear = proto.clear;
-    var rawKey = proto.key;
-    var rawLengthDescriptor = Object.getOwnPropertyDescriptor(proto, "length");
-    var rawLengthGet = rawLengthDescriptor && rawLengthDescriptor.get;
-
-    function getRawLength(instance) {
-      try {
-        if (rawLengthGet) return Number(rawLengthGet.call(instance) || 0);
-      } catch {}
-      try {
-        return Number(instance.length || 0);
-      } catch {}
-      return 0;
-    }
-
-    function getVisibleKeys(instance) {
-      var visible = [];
-      var total = getRawLength(instance);
-      for (var i = 0; i < total; i++) {
-        var currentKey = rawKey.call(instance, i);
-        if (currentKey && !isBlockedStorageKey(currentKey)) {
-          visible.push(currentKey);
-        }
-      }
-      return visible;
-    }
-
-    function maskBlockedKeyProperty(instance, keyName) {
-      if (!keyName || !isBlockedStorageKey(keyName)) return;
-      try {
-        Object.defineProperty(instance, keyName, {
-          configurable: true,
-          enumerable: false,
-          get: function () {
-            return null;
-          },
-          set: function () {
-            return true;
-          }
-        });
-      } catch {}
-    }
-
-    function syncBlockedKeyProperties(instance) {
-      var total = getRawLength(instance);
-      for (var i = 0; i < total; i++) {
-        var k = rawKey.call(instance, i);
-        if (k) maskBlockedKeyProperty(instance, k);
-      }
-    }
-
-    proto.getItem = function (key) {
-      syncBlockedKeyProperties(this);
-      if (isBlockedStorageKey(String(key))) return null;
-      return rawGetItem.call(this, key);
-    };
-
-    proto.setItem = function (key, value) {
-      if (isBlockedStorageKey(String(key))) return;
-      return rawSetItem.call(this, key, value);
-    };
-
-    proto.removeItem = function (key) {
-      if (isBlockedStorageKey(String(key))) return;
-      return rawRemoveItem.call(this, key);
-    };
-
-    proto.clear = function () {
-      if (typeof rawClear !== "function") return;
-
-      // Preserve blocked keys across clear() to prevent auth token/session wipe.
-      var preservedBlockedEntries = [];
-      var total = getRawLength(this);
-      for (var i = 0; i < total; i++) {
-        var blockedKey = rawKey.call(this, i);
-        if (blockedKey && isBlockedStorageKey(blockedKey)) {
-          preservedBlockedEntries.push([
-            blockedKey,
-            rawGetItem.call(this, blockedKey),
-          ]);
-        }
-      }
-
-      rawClear.call(this);
-
-      for (var j = 0; j < preservedBlockedEntries.length; j++) {
-        var entry = preservedBlockedEntries[j];
-        var key = entry[0];
-        var value = entry[1];
-        if (typeof key === "string" && typeof value === "string") {
-          rawSetItem.call(this, key, value);
-        }
-      }
-
-      syncBlockedKeyProperties(this);
-    };
-
-    proto.key = function (index) {
-      syncBlockedKeyProperties(this);
-      var visible = getVisibleKeys(this);
-      return visible[index] || null;
-    };
-
-    try {
-      Object.defineProperty(proto, "length", {
-        configurable: true,
-        enumerable: false,
-        get: function () {
-          syncBlockedKeyProperties(this);
-          return getVisibleKeys(this).length;
-        }
-      });
-    } catch {}
-
-    var proxyStorage = null;
-    try {
-      proxyStorage = new Proxy(storage, {
-        get: function (target, prop) {
-          if (typeof prop === "string" && isBlockedStorageKey(prop)) return null;
-          if (prop === "length") return getVisibleKeys(target).length;
-          if (prop === "key") {
-            return function (index) {
-              var visible = getVisibleKeys(target);
-              return visible[index] || null;
-            };
-          }
-          if (prop === "clear") {
-            return function () {
-              if (typeof rawClear !== "function") return;
-
-              var preservedBlockedEntries = [];
-              var total = getRawLength(target);
-              for (var i = 0; i < total; i++) {
-                var blockedKey = rawKey.call(target, i);
-                if (blockedKey && isBlockedStorageKey(blockedKey)) {
-                  preservedBlockedEntries.push([
-                    blockedKey,
-                    rawGetItem.call(target, blockedKey),
-                  ]);
-                }
-              }
-
-              rawClear.call(target);
-
-              for (var j = 0; j < preservedBlockedEntries.length; j++) {
-                var entry = preservedBlockedEntries[j];
-                var key = entry[0];
-                var value = entry[1];
-                if (typeof key === "string" && typeof value === "string") {
-                  rawSetItem.call(target, key, value);
-                }
-              }
-
-              syncBlockedKeyProperties(target);
-            };
-          }
-
-          var value = target[prop];
-          if (typeof value === "function") return value.bind(target);
-          return value;
-        },
-        set: function (target, prop, value) {
-          if (typeof prop === "string" && isBlockedStorageKey(prop)) return true;
-          target[prop] = value;
-          return true;
-        },
-        has: function (target, prop) {
-          if (typeof prop === "string" && isBlockedStorageKey(prop)) return false;
-          return prop in target;
-        },
-        deleteProperty: function (target, prop) {
-          if (typeof prop === "string" && isBlockedStorageKey(prop)) return true;
-          try {
-            delete target[prop];
-          } catch {}
-          return true;
-        },
-        ownKeys: function (target) {
-          return getVisibleKeys(target);
-        },
-        getOwnPropertyDescriptor: function (target, prop) {
-          if (typeof prop === "string" && isBlockedStorageKey(prop)) {
-            return undefined;
-          }
-          if (prop === "length") {
-            return {
-              configurable: true,
-              enumerable: false,
-              value: getVisibleKeys(target).length,
-              writable: false
-            };
-          }
-          return Object.getOwnPropertyDescriptor(target, prop);
-        }
-      });
-    } catch {}
-
-    try {
-      if (proxyStorage) {
-        Object.defineProperty(window, storageName, {
-          configurable: true,
-          enumerable: true,
-          get: function () {
-            return proxyStorage;
-          }
-        });
-      }
-    } catch {}
-
-    syncBlockedKeyProperties(storage);
-    proto.__auraSupabaseFirewallPatched = true;
-  }
-
-  function patchCookieAccess() {
-    try {
-      var cookieDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, "cookie");
-      if (!cookieDescriptor || !cookieDescriptor.configurable) return;
-
-      Object.defineProperty(document, "cookie", {
-        configurable: true,
-        enumerable: false,
-        get: function () {
-          return "";
-        },
-        set: function () {
-          return true;
-        }
-      });
-    } catch {}
-  }
-
-  function patchFetch() {
-    if (typeof window.fetch !== "function") return;
-    var rawFetch = window.fetch.bind(window);
-    window.fetch = function (input, init) {
-      if (requestLooksSensitive(input, init, null)) {
-        return Promise.reject(new Error("Blocked by Aura security policy"));
-      }
-      return rawFetch(input, init);
-    };
-  }
-
-  function patchXHR() {
-    if (typeof XMLHttpRequest === "undefined") return;
-    var rawOpen = XMLHttpRequest.prototype.open;
-    var rawSetHeader = XMLHttpRequest.prototype.setRequestHeader;
-    var rawSend = XMLHttpRequest.prototype.send;
-
-    XMLHttpRequest.prototype.open = function (method, url) {
-      this.__auraRequestUrl = String(url || "");
-      this.__auraHeaders = {};
-      return rawOpen.apply(this, arguments);
-    };
-
-    XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
-      if (!this.__auraHeaders) this.__auraHeaders = {};
-      this.__auraHeaders[String(name || "").toLowerCase()] = String(value || "");
-      return rawSetHeader.apply(this, arguments);
-    };
-
-    XMLHttpRequest.prototype.send = function () {
-      if (requestLooksSensitive(this.__auraRequestUrl || "", null, this.__auraHeaders || null)) {
-        throw new Error("Blocked by Aura security policy");
-      }
-      return rawSend.apply(this, arguments);
-    };
-  }
-
-  function patchBeacon() {
-    if (typeof navigator.sendBeacon !== "function") return;
-    var rawBeacon = navigator.sendBeacon.bind(navigator);
-    navigator.sendBeacon = function (url, data) {
-      if (requestLooksSensitive(url, null, null)) return false;
-      return rawBeacon(url, data);
-    };
-  }
-
-  function patchWebSocket() {
-    if (typeof WebSocket === "undefined") return;
-    var RawWebSocket = WebSocket;
-    window.WebSocket = function (url, protocols) {
-      if (requestLooksSensitive(String(url || ""), null, null)) {
-        throw new Error("Blocked by Aura security policy");
-      }
-      return new RawWebSocket(url, protocols);
-    };
-    window.WebSocket.prototype = RawWebSocket.prototype;
-  }
-
-  patchStorage(window.localStorage, "localStorage");
-  patchStorage(window.sessionStorage, "sessionStorage");
-  patchCookieAccess();
-  patchFetch();
-  patchXHR();
-  patchBeacon();
-  patchWebSocket();
-})();</script>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>Lumify Fitness — Treinamento de Alto Desempenho</title>
-<meta content="Lumify Fitness — Treinamento de alto desempenho e performance atlética. Programação baseada em ciência, progressão de carga e inteligência de recuperação." name="description"/>
+<title>Lumify — Treino &amp; Performance Premium</title>
+<meta content="Lumify — Treinamento esportivo e performance de alto nivel. Programacao baseada em ciencia, progressao de carga inteligente e recuperacao inteligente." name="description"/>
 <link href="https://fonts.googleapis.com" rel="preconnect"/>
 <link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
 <link href="assets/css2_12fb73902f14.css" rel="stylesheet"/>
@@ -1743,7 +1348,7 @@ z-index: 0;
 box-shadow: 0 12px 56px rgba(249,115,22,0.18), 0 4px 24px rgba(0,0,0,0.5);
 }
 .plan-col.elite::before {
-content: 'MOST POPULAR';
+content: 'MAIS POPULAR';
 position: absolute;
 top: -12px;
 left: 50%;
@@ -2260,15 +1865,6 @@ footer { padding: 40px 20px 24px; }
 .btn-cta-submit { width: 100%; justify-content: center; }
 }
 </style>
-<script src="assets/resource_3fa48481346f"></script><!-- aura-ga4-start -->
-<script async="" src="assets/js_19c0e2c2c8a8.js"></script>
-<script>
-window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-2M6V79H761');
-</script>
-<!-- aura-ga4-end -->
 <style data-scroll-fix="true">
         /* Scroll fixes for offline viewing */
         html, body {
@@ -2280,20 +1876,20 @@ gtag('config', 'G-2M6V79H761');
             opacity: 1 !important;
             visibility: visible !important;
         }
-        
+
         /* Force visibility - many sites use JS animations for initial display */
         body, .wrapper, main, #__next, #app, .page, .content {
             opacity: 1 !important;
             visibility: visible !important;
             transform: none !important;
         }
-        
+
         /* Disable loader/preloader overlays */
         .loader, .preloader, .loading, [class*="loader"], [class*="preloader"] {
             display: none !important;
             opacity: 0 !important;
         }
-        
+
         /* Show elements that might be hidden for animation */
         .word-inner, .char, .line, [data-aos], [data-scroll],
         .hero-text span, .hero-fade, [class*="hero"] span {
@@ -2301,31 +1897,31 @@ gtag('config', 'G-2M6V79H761');
             transform: none !important;
             visibility: visible !important;
         }
-        
+
         /* Reset Tailwind animation utility classes */
         .translate-y-full, .translate-x-full, .-translate-y-full, .-translate-x-full,
         .translate-y-1\/2, .-translate-y-1\/2, .translate-y-\[100\%\], .translate-y-\[110\%\] {
             transform: none !important;
         }
-        
+
         /* Force visibility on common hidden-for-animation patterns */
         .opacity-0, [class*="opacity-0"] {
             opacity: 1 !important;
         }
-        
+
         /* Reset scale transforms used for animations */
         .scale-0, .scale-50, .scale-75 {
             transform: none !important;
         }
-        
-        html.lenis, html.lenis-smooth, 
+
+        html.lenis, html.lenis-smooth,
         body.lenis, body.lenis-smooth,
         .lenis-wrapper, .lenis-content,
         [data-lenis-prevent], [data-scroll-container] {
             overflow: visible !important;
             height: auto !important;
         }
-        
+
         /* Fix flex containers that might cut off content */
         body.flex.items-center,
         body.flex.justify-center {
@@ -2333,7 +1929,7 @@ gtag('config', 'G-2M6V79H761');
             min-height: 100vh;
             height: auto !important;
         }
-        
+
         /* Ensure main content scrolls */
         main, #__next, #__nuxt, #app, .main-content {
             overflow: visible !important;
@@ -2355,9 +1951,9 @@ gtag('config', 'G-2M6V79H761');
 </div>
 <div class="nav-cta">
 <a href="#faq">FAQ</a>
-<a class="btn-nav" href="#cta">Comece Agora</a>
+<a class="btn-nav" href="#cta">Comece Gratis</a>
 </div>
-<button aria-label="Toggle menu" class="hamburger" id="hamburger">
+<button aria-label="Abrir menu" class="hamburger" id="hamburger">
 <span></span>
 <span></span>
 <span></span>
@@ -2370,7 +1966,7 @@ gtag('config', 'G-2M6V79H761');
 <a class="mobile-link" href="#results">Resultados</a>
 <a class="mobile-link" href="#community">Comunidade</a>
 <a class="mobile-link" href="#membership">Planos</a>
-<a class="mobile-link" href="#cta">Comece Agora</a>
+<a class="mobile-link" href="#cta">Comece Gratis</a>
 </div>
 <!-- ─── SECTION 1: HERO ───────────────────────────────────────────── -->
 <section id="hero">
@@ -2383,21 +1979,21 @@ gtag('config', 'G-2M6V79H761');
 <div class="hero-metric">
 <div class="hero-metric-icon"><iconify-icon icon="lucide:flame" noobserver=""></iconify-icon></div>
 <div>
-<div class="hero-metric-label">Sequência Ativa</div>
+<div class="hero-metric-label">Sequencia Ativa</div>
 <div class="hero-metric-value"><span>147</span> dias</div>
 </div>
 </div>
 <div class="hero-metric">
 <div class="hero-metric-icon"><iconify-icon icon="lucide:heart-pulse" noobserver=""></iconify-icon></div>
 <div>
-<div class="hero-metric-label">Score de Recuperação</div>
+<div class="hero-metric-label">Score de Recuperacao</div>
 <div class="hero-metric-value"><span>94</span>/100</div>
 </div>
 </div>
 <div class="hero-metric">
 <div class="hero-metric-icon"><iconify-icon icon="lucide:trophy" noobserver=""></iconify-icon></div>
 <div>
-<div class="hero-metric-label">PRs Este Mês</div>
+<div class="hero-metric-label">PRs Este Mes</div>
 <div class="hero-metric-value"><span>12</span> novos</div>
 </div>
 </div>
@@ -2412,12 +2008,12 @@ gtag('config', 'G-2M6V79H761');
 </h1>
 <div class="hero-desc reveal">
 <p>
-            Programação de precisão com ciência de performance de alto nível.
+            Programacao de precisao com ciencia de performance de elite.
             Feito para atletas que se recusam a aceitar resultados comuns.
           </p>
 <div class="hero-actions">
 <a class="btn-hero-primary" href="#cta">
-<span class="btn-text glitch-text">Comece o Treino</span>
+<span class="btn-text glitch-text">Comecar Treino</span>
 <iconify-icon icon="lucide:arrow-right" noobserver=""></iconify-icon>
 </a>
 <a class="btn-hero-ghost" href="#programs">
@@ -2444,7 +2040,7 @@ gtag('config', 'G-2M6V79H761');
 <div class="hud-separator"></div>
 <div class="hud-item">
 <div>
-<div class="hud-item-label">Sessões</div>
+<div class="hud-item-label">Sessoes</div>
 <div class="hud-item-value"><span id="stat-sessions">0</span><span>M</span></div>
 </div>
 </div>
@@ -2465,27 +2061,27 @@ gtag('config', 'G-2M6V79H761');
 <h2>Quatro caminhos.<br/><em class="text-grad" style="font-style:normal;">Um objetivo.</em></h2>
 </div>
 <p class="reveal-child">
-        Cada programa é projetado com precisão para seu objetivo específico.
+        Cada programa e projetado com precisao para o seu objetivo de adaptacao especifico.
         Escolha sua disciplina. Domine o processo.
       </p>
 </div>
 <div class="program-cards">
-<!-- Card 1 — Foundry -->
+<!-- Card 1 — Fundicao -->
 <div class="program-card reveal-left">
 <div class="program-card-img">
 <img alt="" loading="lazy" src="assets/photo-1534438327276-14e5300c3a_d8bfaed5484f.jpg"/>
 </div>
 <div class="program-card-left prog-bg-diagonal">
 <div class="prog-num">01</div>
-<div class="prog-name">Foundry</div>
+<div class="prog-name">Fundicao</div>
 <div class="prog-badge">
 <iconify-icon icon="lucide:dumbbell" noobserver=""></iconify-icon>
-            Força
+            Forca
           </div>
 </div>
 <div class="program-card-right">
 <p class="prog-desc">
-            A base de tudo. Protocolo progressivo de 16 semanas construído em torno de movimentos compostos, volume baseado em evidências e progressão sistemática de carga.
+            A base de tudo. Um protocolo de forca progressivo de 16 semanas construido em torno de movimentos compostos, volume baseado em evidencias e progressao sistematica de carga. Forge a base. Construa o motor.
           </p>
 <div class="prog-meta">
 <div class="prog-meta-item">
@@ -2503,14 +2099,14 @@ gtag('config', 'G-2M6V79H761');
 </div>
 </div>
 </div>
-<!-- Card 2 — Ignite -->
+<!-- Card 2 — Ignicao -->
 <div class="program-card reveal-right">
 <div class="program-card-img">
 <img alt="" loading="lazy" src="assets/photo-1601422407692-ec4eeec1d9_6e699d484a1b.jpg"/>
 </div>
 <div class="program-card-left prog-bg-dots">
 <div class="prog-num">02</div>
-<div class="prog-name">Ignite</div>
+<div class="prog-name">Ignicao</div>
 <div class="prog-badge">
 <iconify-icon icon="lucide:zap" noobserver=""></iconify-icon>
             HIIT
@@ -2518,7 +2114,7 @@ gtag('config', 'G-2M6V79H761');
 </div>
 <div class="program-card-right">
 <p class="prog-desc">
-            Máximo resultado em mínimo tempo. Protocolos de intervalo de alta intensidade projetados para queimar calorias, elevar o VO2 máx e ativar o EPOC por 48 horas. Rápido, intenso, eficaz.
+            Maximo output em minimo tempo. Protocolos de intervalo de alta intensidade projetados para queimar calorias, elevar o VO2 max e ativar EPOC por 48 horas de pos-queima. Rapido, brutal, eficaz.
           </p>
 <div class="prog-meta">
 <div class="prog-meta-item">
@@ -2532,18 +2128,18 @@ gtag('config', 'G-2M6V79H761');
 </div>
 <div class="intensity-label">
 <div class="intensity-bar"><div class="intensity-fill" data-width="100%"></div></div>
-<span>Intensidade: Máxima</span>
+<span>Intensidade: Maxima</span>
 </div>
 </div>
 </div>
-<!-- Card 3 — Flow -->
+<!-- Card 3 — Fluxo Lumify -->
 <div class="program-card reveal-left">
 <div class="program-card-img">
 <img alt="" loading="lazy" src="assets/photo-1544367567-0f2fcb009e0b_0fa14171d727.jpg"/>
 </div>
 <div class="program-card-left prog-bg-cross">
 <div class="prog-num">03</div>
-<div class="prog-name">Flow</div>
+<div class="prog-name">Fluxo Lumify</div>
 <div class="prog-badge">
 <iconify-icon icon="lucide:wind" noobserver=""></iconify-icon>
             Mobilidade
@@ -2551,7 +2147,7 @@ gtag('config', 'G-2M6V79H761');
 </div>
 <div class="program-card-right">
 <p class="prog-desc">
-            A vantagem esquecida. Mobilidade sistemática, liberação fascial e trabalho de integridade articular que desbloqueia amplitude de movimento, elimina padrões de compensação e torna todos os outros programas mais eficazes.
+            A vantagem negligenciada. Mobilidade sistematica, liberacao fascial e trabalho de integridade articular que destrava amplitude de movimento, elimina padroes de compensacao e torna todos os outros programas mais eficazes.
           </p>
 <div class="prog-meta">
 <div class="prog-meta-item">
@@ -2565,18 +2161,18 @@ gtag('config', 'G-2M6V79H761');
 </div>
 <div class="intensity-label">
 <div class="intensity-bar"><div class="intensity-fill" data-width="55%"></div></div>
-<span>Intensidade: Média</span>
+<span>Intensidade: Media</span>
 </div>
 </div>
 </div>
-<!-- Card 4 — Iron Mind -->
+<!-- Card 4 — Mente de Ferro -->
 <div class="program-card reveal-right">
 <div class="program-card-img">
 <img alt="" loading="lazy" src="assets/photo-1506126613408-eca07ce687_ad3cc20c35cb.jpg"/>
 </div>
 <div class="program-card-left prog-bg-wave">
 <div class="prog-num">04</div>
-<div class="prog-name">Mente Forte</div>
+<div class="prog-name">Mente de Ferro</div>
 <div class="prog-badge">
 <iconify-icon icon="lucide:brain" noobserver=""></iconify-icon>
             Performance Mental
@@ -2584,7 +2180,7 @@ gtag('config', 'G-2M6V79H761');
 </div>
 <div class="program-card-right">
 <p class="prog-desc">
-            A fronteira final da performance atlética. Respiração, condicionamento cognitivo, protocolos de visualização e inoculação ao estresse. Porque todo recorde é quebrado na mente antes do corpo seguir.
+            A fronteira final da performance atletica. Respiracao, condicionamento cognitivo, protocolos de visualizacao e inoculacao ao estresse. Porque todo PR e quebrado na mente antes do corpo seguir.
           </p>
 <div class="prog-meta">
 <div class="prog-meta-item">
@@ -2593,12 +2189,12 @@ gtag('config', 'G-2M6V79H761');
 </div>
 <div class="prog-meta-item">
 <iconify-icon icon="lucide:calendar" noobserver=""></iconify-icon>
-<span>Diário</span>
+<span>Diario</span>
 </div>
 </div>
 <div class="intensity-label">
 <div class="intensity-bar"><div class="intensity-fill" data-width="70%"></div></div>
-<span>Intensidade: Foco</span>
+<span>Intensidade: Focada</span>
 </div>
 </div>
 </div>
@@ -2607,15 +2203,15 @@ gtag('config', 'G-2M6V79H761');
 <!-- ─── SECTION 3: METHODOLOGY ─────────────────────────────────────── -->
 <section id="methodology">
 <div class="method-header">
-<span class="section-label reveal">Como Formamos Atletas</span>
-<h2 class="reveal">A Metodologia Lumify</h2>
+<span class="section-label reveal">Como Construimos Atletas</span>
+<h2 class="reveal">Framework Lumify</h2>
 </div>
 <div class="method-showcase reveal">
-<img alt="Ambiente de treino" loading="lazy" src="assets/photo-1517836357463-d25dfeac34_b93779ff2489.jpg"/>
+<img alt="Ambiente de treino na academia" loading="lazy" src="assets/photo-1517836357463-d25dfeac34_b93779ff2489.jpg"/>
 <div class="method-showcase-overlay">
 <div class="method-showcase-stat">
 <iconify-icon icon="lucide:microscope" noobserver=""></iconify-icon>
-<span><strong>200+</strong> estudos revisados por pares</span>
+<span><strong>200+</strong> estudos revisados por pares referenciados</span>
 </div>
 <div class="method-showcase-stat">
 <iconify-icon icon="lucide:users" noobserver=""></iconify-icon>
@@ -2631,9 +2227,9 @@ gtag('config', 'G-2M6V79H761');
 <div class="method-block">
 <div class="method-num reveal-left">01</div>
 <div class="method-content reveal">
-<h3>Programação Baseada em Ciência</h3>
+<h3>Programacao Baseada em Ciencia</h3>
 <p>
-            Cada sessão é construída sobre ciência do exercício revisada por pares. Faixas de repetição, períodos de descanso, marcos de volume e porcentagens de intensidade não são suposições — são extraídos de décadas de pesquisa em performance e validados por milhares de resultados de atletas.
+            Cada sessao e construida sobre ciencia do exercicio revisada por pares. Faixas de repeticoes, periodos de repouso, marcos de volume e porcentagens de intensidade nao sao adivinhacao — sao extraidas de decadas de pesquisa de performance e validadas por milhares de resultados de atletas. Nao seguimos tendencias. Seguimos dados.
           </p>
 <div class="method-tag">
 <iconify-icon icon="lucide:flask-conical" noobserver=""></iconify-icon>
@@ -2644,26 +2240,26 @@ gtag('config', 'G-2M6V79H761');
 <div class="method-block">
 <div class="method-num reveal-left">02</div>
 <div class="method-content reveal">
-<h3>Progressão de Carga Inteligente</h3>
+<h3>Progressao de Carga Inteligente</h3>
 <p>
-            A adaptação exige estresse progressivo. Nosso sistema registra cada série, repetição e carga — calculando volume semanal, zonas de intensidade e marcadores de fadiga para garantir que você esteja sempre treinando no limite exato da sua capacidade atual. Sempre progredindo.
+            Adaptacao requer estresse progressivo. Nosso sistema de rastreamento registra cada serie, repeticao e carga — calculando volume semanal, zonas de intensidade e marcadores de fadiga para garantir que voce esteja sempre treinando na borda precisa da sua capacidade atual. Nunca facil demais. Nunca em overtraining. Sempre progredindo.
           </p>
 <div class="method-tag">
 <iconify-icon icon="lucide:trending-up" noobserver=""></iconify-icon>
-<span>Progressão Automatizada de Carga</span>
+<span>Progressao de Carga Automatizada</span>
 </div>
 </div>
 </div>
 <div class="method-block">
 <div class="method-num reveal-left">03</div>
 <div class="method-content reveal">
-<h3>Inteligência de Recuperação</h3>
+<h3>Inteligencia de Recuperacao</h3>
 <p>
-            Você não cresce durante o treino. Você cresce durante a recuperação. O sistema de Inteligência de Recuperação da Lumify monitora tendências de VFC, pontuação de qualidade do sono, prontidão subjetiva e carga de treino para prescrever janelas ideais de recuperação. Semanas de deload, sessões de recuperação ativa e dias de descanso são programados com a mesma precisão dos seus treinos mais intensos.
+            Voce nao cresce durante o treino. Voce cresce durante a recuperacao. O sistema de Inteligencia de Recuperacao da Lumify monitora tendencias de HRV, scores de qualidade do sono, prontidao subjetiva e carga de treino para prescrever janelas de recuperacao otimas. Semanas de deload, sessoes de recuperacao ativa e dias de descanso nao sao opcionais — sao programados com a mesma precisao dos seus treinos mais intensos.
           </p>
 <div class="method-tag">
 <iconify-icon icon="lucide:activity" noobserver=""></iconify-icon>
-<span>Janelas de Recuperação baseadas em VFC</span>
+<span>Janelas de Recuperacao Baseadas em HRV</span>
 </div>
 </div>
 </div>
@@ -2672,69 +2268,69 @@ gtag('config', 'G-2M6V79H761');
 <!-- ─── SECTION 4: RESULTS ─────────────────────────────────────────── -->
 <section id="results">
 <div class="results-header">
-<span class="section-label reveal">Provas de Resultado</span>
-<h2 class="reveal">Os números por trás<br/><em class="text-grad" style="font-style:normal;">do trabalho</em></h2>
+<span class="section-label reveal">Prova de Trabalho</span>
+<h2 class="reveal">Os numeros por tras<br/><em class="text-grad" style="font-style:normal;">da dedicacao</em></h2>
 </div>
 <div class="results-split">
 <div class="stat-rows">
 <div class="stat-row reveal" data-stat="">
 <div class="stat-row-top">
-<span class="stat-row-label">Ganho Médio de Força</span>
+<span class="stat-row-label">Ganho Medio de Forca</span>
 <span class="stat-row-value"><span class="stat-num counter" data-target="34">0</span>%</span>
 </div>
 <div class="stat-progress-track">
 <div class="stat-progress-fill" data-width="34%"></div>
 </div>
-<span class="stat-row-sub">Medido em todos os participantes do programa Foundry, primeiro ciclo de 16 semanas</span>
+<span class="stat-row-sub">Medido em todos os participantes do Fundicao, primeiro ciclo de 16 semanas</span>
 </div>
 <div class="stat-row reveal" data-stat="">
 <div class="stat-row-top">
-<span class="stat-row-label">Taxa de Retenção</span>
+<span class="stat-row-label">Taxa de Retencao de Membros</span>
 <span class="stat-row-value"><span class="stat-num counter" data-target="94">0</span>%</span>
 </div>
 <div class="stat-progress-track">
 <div class="stat-progress-fill" data-width="94%"></div>
 </div>
-<span class="stat-row-sub">Média móvel de 12 meses em todos os planos</span>
+<span class="stat-row-sub">Media movel de 12 meses em todos os niveis de plano</span>
 </div>
 <div class="stat-row reveal" data-stat="">
 <div class="stat-row-top">
-<span class="stat-row-label">Melhoria no Score de Recuperação</span>
+<span class="stat-row-label">Melhoria no Score de Recuperacao</span>
 <span class="stat-row-value"><span class="stat-num counter" data-target="89">0</span>/100</span>
 </div>
 <div class="stat-progress-track">
 <div class="stat-progress-fill" data-width="89%"></div>
 </div>
-<span class="stat-row-sub">Score médio de recuperação baseado em VFC após 8 semanas na plataforma</span>
+<span class="stat-row-sub">Score medio de recuperacao baseado em HRV apos 8 semanas na plataforma</span>
 </div>
 <div class="stat-row reveal" data-stat="">
 <div class="stat-row-top">
-<span class="stat-row-label">Sessões Completadas</span>
+<span class="stat-row-label">Sessoes Concluidas</span>
 <span class="stat-row-value"><span class="stat-num counter" data-format="compact" data-target="1200000">0</span></span>
 </div>
 <div class="stat-progress-track">
 <div class="stat-progress-fill" data-width="78%"></div>
 </div>
-<span class="stat-row-sub">Total de treinos registrados desde o lançamento</span>
+<span class="stat-row-sub">Total de treinos registrados desde o lancamento da plataforma</span>
 </div>
 <div class="stat-row reveal" data-stat="">
 <div class="stat-row-top">
-<span class="stat-row-label">Recordes Pessoais Quebrados</span>
+<span class="stat-row-label">Records Pessoais Quebrados</span>
 <span class="stat-row-value"><span class="stat-num counter" data-format="compact" data-target="847000">0</span></span>
 </div>
 <div class="stat-progress-track">
 <div class="stat-progress-fill" data-width="65%"></div>
 </div>
-<span class="stat-row-sub">Recordes pessoais registrados pelos membros Lumify</span>
+<span class="stat-row-sub">PRs individuais registrados pelos membros Lumify</span>
 </div>
 </div>
 <div class="results-image-col reveal-right">
-<img alt="Atleta acompanhando performance" loading="lazy" src="assets/photo-1581009146145-b5ef050c2e_4aed63de32a5.jpg"/>
+<img alt="Atleta rastreando performance" loading="lazy" src="assets/photo-1581009146145-b5ef050c2e_4aed63de32a5.jpg"/>
 <div class="results-image-badge">
 <iconify-icon icon="lucide:trending-up" noobserver=""></iconify-icon>
 <div class="results-image-badge-text">
-<strong>Acompanhamento em tempo real</strong>
-          Cada repetição, série e carga registrada automaticamente
+<strong>Rastreamento em tempo real</strong>
+          Cada repeticao, serie e carga registrada automaticamente
         </div>
 </div>
 </div>
@@ -2743,58 +2339,58 @@ gtag('config', 'G-2M6V79H761');
 <!-- ─── SECTION 5: COMMUNITY ───────────────────────────────────────── -->
 <section id="community">
 <div class="community-header">
-<span class="section-label reveal">Histórias de Membros</span>
-<h2 class="reveal">Feitos diferentes.<br/><em class="text-grad" style="font-style:normal;">Resultados comprovados.</em></h2>
+<span class="section-label reveal">Historias dos Membros</span>
+<h2 class="reveal">Feito diferente.<br/><em class="text-grad" style="font-style:normal;">Resultados comprovados.</em></h2>
 </div>
 <div class="testimonial-stack">
 <div class="testimonial-item reveal">
 <p class="testimonial-quote">
-          "Depois de quatro anos estagnado, o Foundry me deu um PR de 47kg no agachamento em doze semanas.
-          O controle de progressão de carga eliminou todas as minhas desculpas.
-          A única variável restante era <em>aparecer</em>."
+          "Depois de quatro anos estagnado, Fundicao me deu um PR de 47kg no agachamento em doze semanas.
+          O rastreamento de progressao de carga eliminou todas as minhas desculpas.
+          A unica variavel restante era <em>aparecer</em>."
         </p>
 <div class="testimonial-author">
 <div class="author-avatar">
-<img alt="Lucas M." loading="lazy" src="assets/photo-1568602471122-7832951cc4_18286c76b44d.jpg"/>
+<img alt="Marcus D." loading="lazy" src="assets/photo-1568602471122-7832951cc4_18286c76b44d.jpg"/>
 </div>
 <div class="author-line"></div>
 <div class="author-info">
-<div class="author-name">Lucas M.</div>
-<div class="author-detail">Powerlifter Competitivo — Programa Foundry, Ciclo 3</div>
+<div class="author-name">Marcus D.</div>
+<div class="author-detail">Powerlifter Competitivo — Programa Fundicao, Ciclo 3</div>
 </div>
 </div>
 </div>
 <div class="testimonial-item reveal">
 <p class="testimonial-quote">
-          "Mente Forte é o programa que ninguém fala, mas todo atleta precisa.
-          Minha ansiedade nas provas caiu. Meus blocos de foco dobraram.
+          "Mente de Ferro e o programa que ninguem fala, mas todo atleta precisa.
+          Minha ansiedade em provas caiu. Meus blocos de foco dobraram.
           Parei de <em>treinar</em> e comecei a performar."
         </p>
 <div class="testimonial-author">
 <div class="author-avatar">
-<img alt="Ana R." loading="lazy" src="assets/photo-1594381898411-846e7d1938_4b3bce0d6caf.jpg"/>
+<img alt="Priya S." loading="lazy" src="assets/photo-1594381898411-846e7d1938_4b3bce0d6caf.jpg"/>
 </div>
 <div class="author-line"></div>
 <div class="author-info">
-<div class="author-name">Ana R.</div>
-<div class="author-detail">Maratonista — Mente Forte + Flow</div>
+<div class="author-name">Priya S.</div>
+<div class="author-detail">Maratonista — Mente de Ferro + Fluxo Lumify</div>
 </div>
 </div>
 </div>
 <div class="testimonial-item reveal">
 <p class="testimonial-quote">
-          "A inteligência de recuperação já vale o investimento.
-          Eu costumava me destruir nos treinos e me perguntar por que não evoluía.
-          Agora entendo: <em>descanso é programação</em>."
+          "A funcionalidade de inteligencia de recuperacao sozinha ja vale o preco.
+          Eu costumava me esfolar e me perguntar por que nao estava melhorando.
+          Agora entendo: <em>descanso e programacao</em>."
         </p>
 <div class="testimonial-author">
 <div class="author-avatar">
-<img alt="Pedro H." loading="lazy" src="assets/photo-1500648767791-00dcc994a4_1043717994ad.jpg"/>
+<img alt="Jordan T." loading="lazy" src="assets/photo-1500648767791-00dcc994a4_1043717994ad.jpg"/>
 </div>
 <div class="author-line"></div>
 <div class="author-info">
-<div class="author-name">Pedro H.</div>
-<div class="author-detail">Atleta CrossFit — Plano Elite, 14 meses</div>
+<div class="author-name">Jordan T.</div>
+<div class="author-detail">Competidor CrossFit — Plano Elite, 14 meses</div>
 </div>
 </div>
 </div>
@@ -2803,21 +2399,22 @@ gtag('config', 'G-2M6V79H761');
 <!-- ─── SECTION 6: MEMBERSHIP ──────────────────────────────────────── -->
 <section id="membership">
 <div class="membership-header">
-<span class="section-label reveal">Níveis de Membro</span>
+<span class="section-label reveal">Niveis de Plano</span>
 <h2 class="reveal">Invista na sua<br/><em class="text-grad" style="font-style:normal;">performance</em></h2>
 </div>
 <div class="plans-wrapper reveal">
-<!-- Essential -->
+<!-- Essencial -->
 <div class="plan-col essential">
-<div class="plan-name">Essential</div>
+<div class="plan-name">Essencial</div>
 <div class="plan-price">
-<span class="plan-price-num">Sob consulta</span>
+<span class="plan-price-num">R$149</span>
+<span class="plan-price-period">/ mes</span>
 </div>
-<p class="plan-desc">Acesso completo à nossa biblioteca de programação. Perfeito para atletas prontos para construir sua base.</p>
+<p class="plan-desc">Acesso completo a nossa biblioteca principal de programacao. Perfeito para atletas prontos para construir sua base.</p>
 <div class="plan-features">
 <div class="plan-feature included">
 <iconify-icon icon="lucide:check" noobserver=""></iconify-icon>
-<span>4 programas de treino principais</span>
+<span>Todos os 4 programas de treino</span>
 </div>
 <div class="plan-feature included">
 <iconify-icon icon="lucide:check" noobserver=""></iconify-icon>
@@ -2825,15 +2422,15 @@ gtag('config', 'G-2M6V79H761');
 </div>
 <div class="plan-feature included">
 <iconify-icon icon="lucide:check" noobserver=""></iconify-icon>
-<span>Acesso ao fórum da comunidade</span>
+<span>Acesso ao forum da comunidade</span>
 </div>
 <div class="plan-feature included">
 <iconify-icon icon="lucide:check" noobserver=""></iconify-icon>
-<span>Biblioteca de vídeos (400+ movimentos)</span>
+<span>Biblioteca de videos (400+ movimentos)</span>
 </div>
 <div class="plan-feature excluded">
 <iconify-icon icon="lucide:minus" noobserver=""></iconify-icon>
-<span>Inteligência de recuperação (VFC)</span>
+<span>Inteligencia de HRV &amp; recuperacao</span>
 </div>
 <div class="plan-feature excluded">
 <iconify-icon icon="lucide:minus" noobserver=""></iconify-icon>
@@ -2845,10 +2442,10 @@ gtag('config', 'G-2M6V79H761');
 </div>
 <div class="plan-feature excluded">
 <iconify-icon icon="lucide:minus" noobserver=""></iconify-icon>
-<span>Suporte prioritário</span>
+<span>Suporte prioritario</span>
 </div>
 </div>
-<a class="btn-plan" href="https://wa.me/554888721165">Comece o Essential</a>
+<a class="btn-plan" href="#cta">Comecar Essencial</a>
 </div>
 <div class="plan-divider">
 <div class="plan-divider-line"></div>
@@ -2857,13 +2454,14 @@ gtag('config', 'G-2M6V79H761');
 <div class="plan-col elite">
 <div class="plan-name">Elite</div>
 <div class="plan-price">
-<span class="plan-price-num">Sob consulta</span>
+<span class="plan-price-num">R$349</span>
+<span class="plan-price-period">/ mes</span>
 </div>
-<p class="plan-desc">O ecossistema completo de performance. Tudo do Essential, mais as ferramentas que separam atletas bons de excepcionais.</p>
+<p class="plan-desc">O ecossistema completo de performance. Tudo do Essencial, mais as ferramentas que separam atletas bons de excepcionais.</p>
 <div class="plan-features">
 <div class="plan-feature included">
 <iconify-icon icon="lucide:check" noobserver=""></iconify-icon>
-<span>4 programas de treino principais</span>
+<span>Todos os 4 programas de treino</span>
 </div>
 <div class="plan-feature included">
 <iconify-icon icon="lucide:check" noobserver=""></iconify-icon>
@@ -2871,15 +2469,15 @@ gtag('config', 'G-2M6V79H761');
 </div>
 <div class="plan-feature included">
 <iconify-icon icon="lucide:check" noobserver=""></iconify-icon>
-<span>Acesso ao fórum da comunidade</span>
+<span>Acesso ao forum da comunidade</span>
 </div>
 <div class="plan-feature included">
 <iconify-icon icon="lucide:check" noobserver=""></iconify-icon>
-<span>Biblioteca de vídeos (400+ movimentos)</span>
+<span>Biblioteca de videos (400+ movimentos)</span>
 </div>
 <div class="plan-feature included">
 <iconify-icon icon="lucide:check" noobserver=""></iconify-icon>
-<span>Inteligência de recuperação (VFC)</span>
+<span>Inteligencia de HRV &amp; recuperacao</span>
 </div>
 <div class="plan-feature included">
 <iconify-icon icon="lucide:check" noobserver=""></iconify-icon>
@@ -2891,19 +2489,19 @@ gtag('config', 'G-2M6V79H761');
 </div>
 <div class="plan-feature included">
 <iconify-icon icon="lucide:check" noobserver=""></iconify-icon>
-<span>Suporte prioritário + acesso antecipado</span>
+<span>Suporte prioritario + acesso antecipado</span>
 </div>
 </div>
-<a class="btn-plan primary" href="https://wa.me/554888721165">Comece o Elite</a>
+<a class="btn-plan primary" href="#cta">Comecar Elite</a>
 </div>
 </div>
 <div class="membership-cta-banner reveal">
 <div class="banner-text">
-<h3>Não sabe qual plano escolher?</h3>
-<p>Fale conosco pelo WhatsApp e encontre o plano ideal para você.</p>
+<h3>Nao sabe qual plano e ideal para voce?</h3>
+<p>Comece com um teste gratis de 14 dias. Sem cartao de credito. Cancele quando quiser.</p>
 </div>
-<a class="btn-banner" href="https://wa.me/554888721165">
-<span class="btn-text">Fale Conosco</span>
+<a class="btn-banner" href="#cta">
+<span class="btn-text">Garantir Teste Gratis</span>
 <iconify-icon icon="lucide:arrow-right" noobserver=""></iconify-icon>
 </a>
 </div>
@@ -2912,72 +2510,72 @@ gtag('config', 'G-2M6V79H761');
 <section id="faq">
 <div class="faq-header">
 <span class="section-label reveal">Perguntas Respondidas</span>
-<h2 class="reveal">Tudo que você<br/><em class="text-grad" style="font-style:normal;">precisa saber</em></h2>
+<h2 class="reveal">Tudo que voce<br/><em class="text-grad" style="font-style:normal;">precisa saber</em></h2>
 </div>
 <div class="faq-grid stagger-up">
 <div class="faq-item reveal-child">
 <div class="faq-question">
-<span>Qual nível de condicionamento eu preciso para começar?</span>
+<span>Qual nivel de fitness eu preciso para comecar?</span>
 <div class="faq-icon"><iconify-icon icon="lucide:plus" noobserver=""></iconify-icon></div>
 </div>
 <div class="faq-answer">
 <div class="faq-answer-inner">
-            Todo programa Lumify inclui uma avaliação de nível durante o onboarding. O Foundry, por exemplo, tem faixas para Iniciante (0–1 ano de treino), Intermediário (1–3 anos) e Avançado. A programação se adapta aos seus números atuais. Se você agacha, supina e levanta terra com forma básica, está pronto para qualquer programa.
+            Cada programa Lumify inclui uma avaliacao de Nivel Seletor durante o onboarding. Fundicao, por exemplo, tem trilhas Iniciante (0-1 ano de treino), Intermediario (1-3 anos) e Avancado. A programacao se adapta aos seus numeros atuais. Se voce agacha, pressiona e levanta terra com forma basica, esta pronto para qualquer programa desta plataforma.
           </div>
 </div>
 </div>
 <div class="faq-item reveal-child">
 <div class="faq-question">
-<span>Preciso de uma academia completa, ou posso treinar em casa?</span>
+<span>Preciso de uma academia completa ou posso treinar em casa?</span>
 <div class="faq-icon"><iconify-icon icon="lucide:plus" noobserver=""></iconify-icon></div>
 </div>
 <div class="faq-answer">
 <div class="faq-answer-inner">
-            Foundry e Ignite são projetados para uma academia totalmente equipada com barras, racks e máquinas. Flow e Mente Forte precisam apenas de um tapete e espaço aberto. A biblioteca também inclui variações para treino em casa com halteres, elásticos e peso corporal.
+            Fundicao e Ignicao sao projetados para uma academia totalmente equipada com barras, racks e maquinas. Fluxo Lumify e Mente de Ferro requerem apenas um tapete e espaco aberto. A biblioteca de programas tambem inclui variantes para academia domestica com halteres, faixas e substituicoes com peso corporal.
           </div>
 </div>
 </div>
 <div class="faq-item reveal-child">
 <div class="faq-question">
-<span>Posso combinar vários programas ao mesmo tempo?</span>
+<span>Posso combinar multiplos programas simultaneamente?</span>
 <div class="faq-icon"><iconify-icon icon="lucide:plus" noobserver=""></iconify-icon></div>
 </div>
 <div class="faq-answer">
 <div class="faq-answer-inner">
-            Sim — e encorajamos. Nossa combinação mais popular é Foundry + Flow, que une trabalho de força com sessões diárias de mobilidade. Mente Forte é projetado como camada suplementar a qualquer programa. Combinar Foundry + Ignite é avançado e deve ser feito após completar pelo menos um ciclo completo de cada um individualmente.
+            Sim — e incentivamos isso. Nossa combinacao mais popular e Fundicao + Fluxo Lumify, que combina trabalho de forca com sessoes diarias de mobilidade. Mente de Ferro e projetada como uma camada complementar a qualquer programa. Combinar Fundicao + Ignicao e avancado e so deve ser tentado apos completar pelo menos um ciclo completo de cada individualmente.
           </div>
 </div>
 </div>
 <div class="faq-item reveal-child">
 <div class="faq-question">
-<span>Como funciona o sistema de inteligência de recuperação?</span>
+<span>Como funciona o sistema de inteligencia de recuperacao?</span>
 <div class="faq-icon"><iconify-icon icon="lucide:plus" noobserver=""></iconify-icon></div>
 </div>
 <div class="faq-answer">
 <div class="faq-answer-inner">
-            A Inteligência de Recuperação agrega sua leitura diária de VFC (via wearables compatíveis ou check-in manual), duração do sono, pontuação de prontidão subjetiva e carga de treino dos últimos 7 dias. O algoritmo gera uma pontuação diária de prontidão e recomenda se você deve treinar com intensidade total, reduzir carga em 20% ou ter um dia de recuperação ativa. Este recurso é exclusivo do plano Elite.
+            A Inteligencia de Recuperacao agrega sua leitura diaria de HRV (via wearaveis compativeis ou check-in manual), duracao do sono, score de prontidao subjetiva e carga de treino de 7 dias. O algoritmo gera um score diario de prontidao e recomenda se deve treinar com intensidade total, reduzir carga em 20% ou tomar um dia de recuperacao ativa. Esta funcionalidade e exclusiva do plano Elite.
           </div>
 </div>
 </div>
 <div class="faq-item reveal-child">
 <div class="faq-question">
-<span>Quais wearables a Lumify integra?</span>
+<span>Quais wearaveis a Lumify integra?</span>
 <div class="faq-icon"><iconify-icon icon="lucide:plus" noobserver=""></iconify-icon></div>
 </div>
 <div class="faq-answer">
 <div class="faq-answer-inner">
-            A Lumify conecta nativamente com Whoop, Garmin, Apple Health e Google Fit. A integração com Oura Ring está em beta para membros Elite. Todos os dados sincronizam automaticamente toda manhã e atualizam seu score de recuperação antes da primeira sessão do dia.
+            A Lumify conecta nativamente com Whoop, Garmin, Apple Health e Google Fit. A integracao com Oura Ring esta em beta para membros Elite. Todos os dados sincronizam automaticamente toda manha e atualizam seu score de recuperacao antes da primeira sessao do dia.
           </div>
 </div>
 </div>
 <div class="faq-item reveal-child">
 <div class="faq-question">
-<span>Qual é a política de cancelamento?</span>
+<span>Qual e a politica de cancelamento?</span>
 <div class="faq-icon"><iconify-icon icon="lucide:plus" noobserver=""></iconify-icon></div>
 </div>
 <div class="faq-answer">
 <div class="faq-answer-inner">
-            Cancele quando quiser, sem perguntas, diretamente nas configurações da sua conta. Seu acesso continua até o final do período de cobrança atual. Não cobramos taxas de cancelamento, e todos os seus dados — treinos, recordes, anotações — permanecem acessíveis por 12 meses após o cancelamento.
+            Cancele a qualquer momento, sem perguntas, diretamente nas configuracoes da sua conta. Seu acesso continua ate o final do periodo de cobranca atual. Nao cobramos taxas de cancelamento, e todos os seus dados registrados — treinos, PRs, anotacoes de progresso — permanecem acessiveis por 12 meses apos o cancelamento.
           </div>
 </div>
 </div>
@@ -2988,19 +2586,19 @@ gtag('config', 'G-2M6V79H761');
 <div class="cta-bg-image">
 <img alt="" loading="lazy" src="assets/photo-1549060279-7e168fcee0c2_2cca461f4e4d.jpg"/>
 </div>
-<span class="section-label cta-label reveal">Comece Sua Transformação</span>
+<span class="section-label cta-label reveal">A Primeira Repeticao e Gratis</span>
 <h2 class="cta-headline reveal">
 <span class="line-a">Comece</span>
-<span class="line-b text-grad glitch-text">Agora</span>
+<span class="line-b text-grad glitch-text">Sua Jornada</span>
 </h2>
 <form class="cta-form reveal" onsubmit="handleCtaSubmit(event)">
 <input autocomplete="email" class="cta-input" placeholder="seu@email.com" required="" type="email"/>
 <button class="btn-cta-submit" type="submit">
-<span>Comece Agora</span>
+<span>Comecar Teste Gratis</span>
 <iconify-icon icon="lucide:arrow-right" noobserver=""></iconify-icon>
 </button>
 </form>
-<p class="cta-fine reveal">Fale conosco pelo WhatsApp e comece sua jornada. Sem compromisso.</p>
+<p class="cta-fine reveal">Teste gratis por 14 dias. Sem cartao de credito. Cancele quando quiser.</p>
 </section>
 <!-- ─── FOOTER ─────────────────────────────────────────────────────── -->
 <footer>
@@ -3009,23 +2607,29 @@ gtag('config', 'G-2M6V79H761');
 <div class="footer-logo">
 <span class="logo-text">LUMIFY</span>
 </div>
-<p>Programação de performance atlética de alto nível. Feito para atletas que exigem mais de si mesmos.</p>
+<p>Programacao esportiva e performance de alto nivel. Feito para atletas que exigem mais de si mesmos.</p>
 <div class="footer-social">
-<a aria-label="Instagram" href="https://www.instagram.com/lumifycompany/">
+<a aria-label="Instagram" href="#">
 <iconify-icon icon="lucide:instagram" noobserver=""></iconify-icon>
 </a>
-<a aria-label="WhatsApp" href="https://wa.me/554888721165">
-<iconify-icon icon="lucide:message-circle" noobserver=""></iconify-icon>
+<a aria-label="Twitter" href="#">
+<iconify-icon icon="lucide:twitter" noobserver=""></iconify-icon>
+</a>
+<a aria-label="YouTube" href="#">
+<iconify-icon icon="lucide:youtube" noobserver=""></iconify-icon>
+</a>
+<a aria-label="LinkedIn" href="#">
+<iconify-icon icon="lucide:linkedin" noobserver=""></iconify-icon>
 </a>
 </div>
 </div>
 <div class="footer-col">
 <h4>Programas</h4>
 <ul>
-<li><a href="#programs">Foundry — Força</a></li>
-<li><a href="#programs">Ignite — HIIT</a></li>
-<li><a href="#programs">Flow — Mobilidade</a></li>
-<li><a href="#programs">Mente Forte — Performance Mental</a></li>
+<li><a href="#programs">Fundicao — Forca</a></li>
+<li><a href="#programs">Ignicao — HIIT</a></li>
+<li><a href="#programs">Fluxo Lumify — Mobilidade</a></li>
+<li><a href="#programs">Mente de Ferro — Performance Mental</a></li>
 </ul>
 </div>
 <div class="footer-col">
@@ -3034,7 +2638,7 @@ gtag('config', 'G-2M6V79H761');
 <li><a href="#">Sobre a Lumify</a></li>
 <li><a href="#">Nossos Treinadores</a></li>
 <li><a href="#">Parceiros de Pesquisa</a></li>
-<li><a href="#">Imprensa</a></li>
+<li><a href="#">Kit de Imprensa</a></li>
 <li><a href="#">Carreiras</a></li>
 </ul>
 </div>
@@ -3043,7 +2647,7 @@ gtag('config', 'G-2M6V79H761');
 <ul>
 <li><a href="#faq">FAQ</a></li>
 <li><a href="#">Central de Ajuda</a></li>
-<li><a href="https://wa.me/554888721165">Fale Conosco</a></li>
+<li><a href="#">Fale Conosco</a></li>
 <li><a href="#">Comunidade</a></li>
 <li><a href="#">Status do Sistema</a></li>
 </ul>
@@ -3051,12 +2655,12 @@ gtag('config', 'G-2M6V79H761');
 </div>
 <div class="footer-bottom">
 <span class="footer-copy">
-        © <span id="footer-year"></span> Lumify Fitness. Todos os direitos reservados.
+        © <span id="footer-year"></span> Lumify Performance, Inc. Todos os direitos reservados.
       </span>
 <div class="footer-legal">
-<a href="#">Política de Privacidade</a>
-<a href="#">Termos de Serviço</a>
-<a href="#">Política de Cookies</a>
+<a href="#">Politica de Privacidade</a>
+<a href="#">Termos de Servico</a>
+<a href="#">Politica de Cookies</a>
 </div>
 </div>
 </footer>
@@ -3234,7 +2838,7 @@ gtag('config', 'G-2M6V79H761');
       e.preventDefault();
       const btn = e.target.querySelector('.btn-cta-submit');
       const originalContent = btn.innerHTML;
-      btn.innerHTML = '<iconify-icon icon="lucide:check" noobserver></iconify-icon><span>Enviado! Verifique seu email.</span>';
+      btn.innerHTML = '<iconify-icon icon="lucide:check" noobserver></iconify-icon><span>Confirmado. Verifique seu email.</span>';
       btn.style.background = 'linear-gradient(135deg, #16a34a, #22c55e)';
       setTimeout(() => {
         btn.innerHTML = originalContent;
@@ -3359,4 +2963,4 @@ gtag('config', 'G-2M6V79H761');
       requestAnimationFrame(render);
     })();
   </script>
-<script data-img-fallback-handler="">!function(){var f=["https://hoirqrkdgbmvpwutwuwj.supabase.co/storage/v1/object/public/assets/assets/917d6f93-fb36-439a-8c48-884b67b35381_1600w.jpg","https://hoirqrkdgbmvpwutwuwj.supabase.co/storage/v1/object/public/assets/assets/4734259a-bad7-422f-981e-ce01e79184f2_1600w.jpg","https://hoirqrkdgbmvpwutwuwj.supabase.co/storage/v1/object/public/assets/assets/c543a9e1-f226-4ced-80b0-feb8445a75b9_1600w.jpg","https://hoirqrkdgbmvpwutwuwj.supabase.co/storage/v1/object/public/assets/assets/5bab247f-35d9-400d-a82b-fd87cfe913d2_1600w.webp","https://hoirqrkdgbmvpwutwuwj.supabase.co/storage/v1/object/public/assets/assets/30104e3c-5eea-4b93-93e9-5313698a7156_1600w.webp"],h=new Set;function g(s){for(var x=0,i=0;i<s.length;i++)x=(x<<5)-x+s.charCodeAt(i)|0;return f[Math.abs(x)%f.length]}function r(t){var s=t.src;if(s&&!h.has(s)){h.add(s);t.src=g(s)}}window.addEventListener("error",function(e){var t=e.target;if(t&&t.tagName==="IMG")r(t)},!0);function c(){document.querySelectorAll("img").forEach(function(i){if(i.complete&&!i.naturalWidth&&i.src)r(i)})}if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",c);else c()}()</script></body></html>
+</body></html>
